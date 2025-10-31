@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>VerticalFarmQR — QR Scanner + Guide</title>
+
+  <!-- Tailwind (play CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- html5-qrcode library -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
+
+  <!-- React & ReactDOM UMD builds -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+
+  <!-- Babel (to compile JSX in-browser) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel">
+  const { useState, useEffect, useRef } = React;
+
+  /********** Utility helpers **********/
+  function isProbablyUrl(text) {
+    try {
+      // Accept http(s) and also common url-like strings
+      const maybe = text.trim();
+      if (/^https?:\/\//i.test(maybe)) return true;
+      // simple domain check like example.com or www.example.com
+      if (/^[\w-]+(\.[\w-]+)+/.test(maybe)) return true;
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /********** Simple in-app routing (no react-router) **********/
+  function useSimpleRouter() {
+    const [path, setPath] = useState(window.location.pathname);
+    useEffect(() => {
+      const onpop = () => setPath(window.location.pathname);
+      window.addEventListener('popstate', onpop);
+      return () => window.removeEventListener('popstate', onpop);
+    }, []);
+    function push(newPath) {
+      if (newPath !== window.location.pathname) {
+        window.history.pushState({}, '', newPath);
+        setPath(newPath);
+      }
+    }
+    return { path, push };
+  }
+
+  /********** Nav **********/
+  function Nav({ navigateTo }) {
+    return (
+      <header className="bg-white shadow-sm">
+        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-green-600 to-emerald-400 flex items-center justify-center text-white font-bold">VF</div>
+            <div>
+              <div className="text-lg font-semibold">VerticalFarmQR</div>
+              <div className="text-xs text-slate-400">Scan → Learn</div>
+            </div>
+          </div>
+          <nav className="flex items-center gap-4 text-sm">
+            <button onClick={() => navigateTo('/')} className="px-3 py-1 rounded-md hover:bg-slate-100">Scan</button>
+            <button onClick={() => navigateTo('/guide')} className="px-3 py-1 rounded-md hover:bg-slate-100">Guide</button>
+            <a className="px-3 py-1 rounded-md bg-green-600 text-white" href="#" onClick={(e)=>{e.preventDefault(); navigateTo('/guide');}}>Open Guide</a>
+          </nav>
+        </div>
+      </header>
+    );
+  }
+
+  /********** Scanner component **********/
+  function Scanner({ navigateTo }) {
+    const [scanning, setScanning] = useState(false);
+    const [lastResult, setLastResult] = useState(null);
+    const html5QrcodeRef = useRef(null);
+    const scannerId = 'qr-scanner';
+
+    useEffect(() => {
+      return () => {
+        // cleanup on unmount
+        if (html5QrcodeRef.current) {
+          html5QrcodeRef.current.stop().catch(()=>{/* ignore */});
+          html5QrcodeRef.current.clear().catch(()=>{/* ignore */});
+        }
+      };
+    }, []);
+
+    async function startCamera() {
+      if (scanning) return;
+      setLastResult(null);
+
+      // Create Html5Qrcode if not exists
+      if (!html5QrcodeRef.current) {
+        html5QrcodeRef.current = new Html5Qrcode(scannerId, /* verbose= */ false);
+      }
+
+      const html5QrCode = html5QrcodeRef.current;
+
+      const config = {
+        fps: 15,
+        qrbox: { width: 250, height: 250 },
+        rememberLastUsedCamera: true
+      };
+
+      try {
+        setScanning(true);
+
+        // list cameras and pick the back camera if available
+        const devices = await Html5Qrcode.getCameras();
+        let cameraId = devices && devices.length ? devices[0].id : null;
+        // try to pick environment facing camera
+        if (devices && devices.length > 1) {
+          const back = devices.find(d => /back|rear|environment/i.test(d.label));
+          if (back) cameraId = back.id;
+        }
+
+        await html5QrCode.start(
+          cameraId,
+          config,
+          (decodedText, decodedResult) => {
+            // on success
+            setLastResult(decodedText);
+            // stop scanning before redirecting
+            html5QrCode.stop().then(() => {
+              setScanning(false);
+              handleDecoded(decodedText);
+            }).catch(() => {
+              setScanning(false);
+              handleDecoded(decodedText);
+            });
+          },
+          (errorMessage) => {
+            // optional callback for scan failure per frame
+            // console.debug('scan fail', errorMessage);
+          }
+        );
+      } catch (err) {
+        console.error('Camera start error', err);
+        setScanning(false);
+        alert('Could not start camera. Ensure you allowed camera permissions and are on HTTPS or localhost.');
+      }
+    }
+
+    function stopCamera() {
+      if (html5QrcodeRef.current && scanning) {
+        html5QrcodeRef.current.stop().then(() => {
+          setScanning(false);
+        }).catch((err) => {
+          console.warn('stop failed', err);
+          setScanning(false);
+        });
+      }
+    }
+
+    function handleDecoded(text) {
+      const trimmed = text.trim();
+      if (!trimmed) {
+        alert('Empty QR code content.');
+        return;
+      }
+
+      // If it's a URL -> redirect to it (external)
+      if (isProbablyUrl(trimmed)) {
+        // ensure proper protocol
+        let target = trimmed;
+        if (!/^https?:\/\//i.test(target)) {
+          target = 'https://' + target;
+        }
+        // ask user before leaving? We'll open immediately per spec.
+        window.location.href = target;
+        return;
+      }
+
+      // If it looks like a path within app (starts with /guide or /)
+      if (trimmed.startsWith('/')) {
+        navigateTo(trimmed);
+        return;
+      }
+
+      // Otherwise show it and allow copy / manual open
+      if (confirm(`QR content:\n\n${trimmed}\n\nOpen this text as a URL? (OK = try open in new tab)`)) {
+        // try to open
+        let tryUrl = trimmed;
+        if (!/^https?:\/\//i.test(tryUrl)) tryUrl = 'https://' + tryUrl;
+        window.open(tryUrl, '_blank');
+      } else {
+        // nothing
+      }
+    }
+
+    return (
+      <main className="max-w-4xl mx-auto px-4 py-8">
+        <div className="bg-white rounded-xl shadow p-6">
+          <h2 className="text-xl font-semibold">QR Scanner</h2>
+          <p className="mt-2 text-sm text-slate-600">Point your camera at a QR code. If the QR contains a URL, you'll be redirected automatically. This page requires camera permission and HTTPS (or localhost).</p>
+
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <div id={scannerId} className="w-full rounded-md overflow-hidden bg-black" style={{minHeight: 300}}></div>
+
+              <div className="mt-4 flex gap-3">
+                <button onClick={startCamera} disabled={scanning} className={`px-4 py-2 rounded-md ${scanning ? 'bg-slate-200' : 'bg-green-600 text-white'}`}>
+                  {scanning ? 'Scanning...' : 'Start Camera'}
+                </button>
+                <button onClick={stopCamera} disabled={!scanning} className="px-4 py-2 rounded-md border">
+                  Stop
+                </button>
+                <button onClick={() => {
+                  // manual navigate to built-in guide for testing
+                  navigateTo('/guide');
+                }} className="px-4 py-2 rounded-md border">Open Guide (demo)</button>
+              </div>
+
+              <div className="mt-3 text-sm text-slate-500">
+                <div>Tip: use a QR that encodes an URL (like <code>https://example.com</code>) or internal path <code>/guide</code>.</div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-medium">Last scan</h3>
+              <div className="mt-2 p-3 bg-slate-50 rounded-md min-h-[120px]">
+                {lastResult ? (
+                  <>
+                    <div className="break-words">{lastResult}</div>
+                    <div className="mt-3 flex gap-2">
+                      <button className="px-3 py-1 rounded-md border" onClick={() => {
+                        navigator.clipboard?.writeText(lastResult);
+                        alert('Copied to clipboard');
+                      }}>Copy</button>
+                      <button className="px-3 py-1 rounded-md border" onClick={()=>{
+                        if (isProbablyUrl(lastResult)) {
+                          let url = lastResult;
+                          if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+                          window.open(url, '_blank');
+                        } else if (lastResult.startsWith('/')) {
+                          navigateTo(lastResult);
+                        } else {
+                          alert('Not a URL: ' + lastResult);
+                        }
+                      }}>Open</button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-slate-400">No scans yet.</div>
+                )}
+              </div>
+
+              <div className="mt-4 text-sm text-slate-600">
+                <p><strong>Fallback:</strong> you can also upload an image with a QR code.</p>
+                <input type="file" accept="image/*" onChange={async (e) => {
+                  const f = e.target.files && e.target.files[0];
+                  if (!f) return;
+                  const reader = new FileReader();
+                  reader.onload = async () => {
+                    const dataUrl = reader.result;
+                    try {
+                      const result = await Html5Qrcode.scanFileV2(f, true /*tryInverted*/);
+                      if (result && result.decodedText) {
+                        setLastResult(result.decodedText);
+                        handleDecoded(result.decodedText);
+                      } else {
+                        alert('No QR code found in the image.');
+                      }
+                    } catch (err) {
+                      alert('Could not decode image: ' + err);
+                    }
+                  };
+                  reader.readAsDataURL(f);
+                }} className="mt-2" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  /********** Guide component (sample videos) **********/
+  function Guide() {
+    const videos = [
+      { id: 'x5Yf0sV0X1Q', title: 'Vertical Farming for Beginners — Overview' },
+      { id: 'M6Yv0eZk9N0', title: 'How to Build a Small Vertical Farm (DIY)' },
+      { id: 'JtXy1M7a8kE', title: 'Lighting, Nutrients and Hydroponics Basics' }
+    ];
+    // Note: video ids above are placeholders — replace with actual YouTube IDs you prefer.
+
+    return (
+      <main className="max-w-5xl mx-auto px-4 py-8">
+        <div className="bg-white rounded-xl shadow p-6">
+          <h2 className="text-2xl font-semibold">Beginner's Guide to Vertical Farming</h2>
+          <p className="mt-2 text-slate-600">A curated set of beginner-focused videos and resources to help you start vertical farming at home or commercially.</p>
+
+          <section className="mt-6 grid gap-6">
+            <div className="grid md:grid-cols-2 gap-4">
+              {videos.map(v => (
+                <div key={v.id} className="bg-slate-50 rounded-md overflow-hidden">
+                  <div className="aspect-w-16 aspect-h-9">
+                    <iframe
+                      title={v.title}
+                      src={`https://www.youtube.com/embed/${v.id}`}
+                      frameBorder="0"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                      className="w-full h-48"
+                    />
+                  </div>
+                  <div className="p-3">
+                    <div className="font-medium">{v.title}</div>
+                    <div className="mt-2 text-sm text-slate-500">Short description or notes about the video can go here.</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-white rounded-md p-4 border">
+              <h4 className="font-semibold">Quick-start checklist</h4>
+              <ul className="mt-2 list-disc ml-5 text-sm text-slate-600 space-y-1">
+                <li>Decide on hydroponic vs aeroponic vs soil-based vertical racks.</li>
+                <li>Choose LED grow lights appropriate for your crops.</li>
+                <li>Start with leafy greens (lettuce, basil) — faster growth.</li>
+                <li>Monitor pH and nutrient concentration regularly.</li>
+                <li>Scale gradually and document your settings.</li>
+              </ul>
+            </div>
+          </section>
+        </div>
+      </main>
+    );
+  }
+
+  /********** App **********/
+  function App() {
+    const router = useSimpleRouter();
+
+    function navigateTo(p) {
+      // Accept full URLs: if absolute, go there; if path, route internally
+      if (/^https?:\/\//i.test(p)) {
+        window.location.href = p;
+        return;
+      }
+      // If it's a path like /something, push state
+      router.push(p);
+    }
+
+    return (
+      <div>
+        <Nav navigateTo={navigateTo} />
+        <div className="py-6">
+          {router.path === '/' && (
+            <Scanner navigateTo={navigateTo} />
+          )}
+          {router.path === '/guide' && (
+            <Guide />
+          )}
+          {/* Fallback for other internal routes */}
+          {router.path !== '/' && router.path !== '/guide' && (
+            <main className="max-w-4xl mx-auto px-4 py-8">
+              <div className="bg-white rounded-xl shadow p-6">
+                <h2 className="text-xl font-semibold">Route: {router.path}</h2>
+                <p className="mt-2 text-slate-600">This route is not explicitly defined in the app. If you scanned a QR code with this path, you arrived here.</p>
+                <div className="mt-4">
+                  <button className="px-3 py-2 rounded-md border" onClick={() => navigateTo('/')}>Back to Scanner</button>
+                </div>
+              </div>
+            </main>
+          )}
+        </div>
+
+        <footer className="mt-8 py-6 text-sm text-slate-500">
+          <div className="max-w-5xl mx-auto px-4 border-t pt-4 flex justify-between">
+            <div>© {new Date().getFullYear()} VerticalFarmQR</div>
+            <div>Make sure to host on HTTPS for camera access</div>
+          </div>
+        </footer>
+      </div>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
